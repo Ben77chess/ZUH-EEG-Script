@@ -1,15 +1,10 @@
 import matlab.net.*;
-% This script iterates through a large database of EEG files, identifies
-% the 'eyes closed' events annotated in those files, and extracts EEG data
-% from the O1 and O2 channels. This data is then used to estimate the
-% frequency of the PDR observed at that event. For each individual, the
-% median of all of these estimates is taken as an estimate for the
-% individual, and this estimate is plotted on a scatterplot, and a LOESS
-% line of best fit is generated.
-% Benjamin Weinberg Fall 2018
 
-% To do: confidence intervals
+% Color code by duration, confidence intervals, reconstruct list of sigge
+% scored files
 % Field initialization
+% Email Ivan about oo memory and how to use r to make line of best fits
+% Regenerate b-a, make flow charts.
 nicoletFiles = dir('**/*.e');
 figurecounter = 1;
 filesRead = strings(1, 16800); %[""] The magic number here is the total number of files being scanned (preallocation hopefully for speed)
@@ -31,12 +26,16 @@ childAge3 = 3;
 secondsToSample = 5; %How many seconds of data do we want to pull?
 desiredChannels = ["O1", "O2"]; %O1-M1, C3-M2, C4-M1 << Sleep EEG Channels
 secondOffset = 1; %Wating this long after eyes closed to collect data
-componentGraphs = false; % Do we want to plot each eyes closed event we analyze + corresponding signal?
+componentGraphs = true; % Do we want to plot each eyes closed event we analyze + corresponding signal?
 patientInfo = true; %If we have the info or not (Needs this in order to function in a meaningful capacity)
 dataMap = containers.Map('KeyType','char', 'ValueType','any');
 scrambledID = 0;
 %oldDB = false;
-fractionToEval = 1;
+fractionToEval = 10;
+ivanPDR = [];
+ivanPDRPeaks = [];
+dataMapIvan = containers.Map('KeyType','char', 'ValueType','any');
+ivan = false;
 longestDuration = 0;
 shortestDuration = 999999999;
 currentDuration = 0;
@@ -88,7 +87,7 @@ for file = nicoletFiles'
                 ME = MException('No one is actually this old (Likely an error in the CPR number entry in this file) ' + [file.folder '\' file.name]);
                 throw(ME)
             end
-            scrambledID = base64toHex(doHMAC_SHA1(OBJ.patientInfo.altID, "Changed")); %Change the key in here if the code is ever published
+            scrambledID = base64toHex(doHMAC_SHA1(OBJ.patientInfo.altID, "Ben")); %Change the key in here if the code is ever published
         end
     catch ME
         filesError = [filesError [file.folder '\' file.name]];
@@ -144,6 +143,20 @@ for file = nicoletFiles'
             size_data = size(data);
             timeVec = max(secondOffset*sampleRate,1):secondsToSample*sampleRate-1;
             
+            %Ivan's function
+            if(ivan)
+                ivanData = [];
+                currPos = 1;
+                for i = 1:length(OBJ.segments)
+                    ivanData = [ivanData getdataQ(OBJ, i, [currPos OBJ.segments(i).duration*sampleRate], desiredChannelIndices)];
+                    currPos = currPos + OBJ.segments(i).duration*sampleRate;
+                end
+                [PDR,PDRpeak,secondsUsed] = estPDR(ivanData,sampleRate);
+                ivanPDR = [ivanPDR PDR];
+                ivanPDRPeaks = [ivanPDRpeaks PDRpeak];
+            end
+            
+            
             transposed_data = data';
             curr_signal = pop_importdata('data', transposed_data, 'srate', sampleRate, 'nbchan', length(data), 'pnts', length(transposed_data)); %Transfer to eeglab structure so we can filter with their functions
             curr_signal = pop_eegfiltnew(curr_signal, lowCutoff, highCutoff);
@@ -165,7 +178,7 @@ for file = nicoletFiles'
                 subplot(2,1,1)
                	findpeaks(pxx,f); xlim([0 20]);
                 hold on;
-                findpeaks(pxx2,f2); xlim([0 20]);
+                %findpeaks(pxx2,f2); xlim([0 20]);
                 title(file.name + " Eyes Closed Event Number " + x);
                 
                 subplot(2,1,2)
@@ -220,8 +233,10 @@ for file = nicoletFiles'
                 if(o1pks ~= 0) %We will not add when no peaks are found to the map
                     if(~isKey(dataMap, scrambledID)) %If it's a new patient
                         dataMap(scrambledID) = [age, sex, currentDuration,o1pks];
+                        dataMapIvan(scrambledID) = [age, sex, currentDuration, PDR]
                     else %%The patient is there
                         dataMap(scrambledID) = [dataMap(scrambledID) o1pks];
+                        dataMapIvan(scrambledID) = [dataMapIvan(scrambledID) PDR];
                     end
                 end
             end
@@ -234,7 +249,7 @@ for file = nicoletFiles'
     end
 end
 %filesRead = filesRead(find(filesRead,1,'first'):find(filesRead,1,'last'));
-durationList = sort(durationList)
+durationList = sort(durationList);
 
 ageVec = [];
 colorVec = [];
@@ -242,6 +257,7 @@ medVec = [];
 %colors = [[0 0 1]; [1 0 0]]; %F, M
 k = keys(dataMap) ;
 val = values(dataMap) ;
+valIvan = values(dataMapIvan);
 for x = 1:length(dataMap)
     %if(length(val{x}) > 4 && median(val{x}(3:end) ~= 0)) %At least 3 values, median not 0
         ageVec = [ageVec val{x}(1)];
@@ -265,6 +281,7 @@ for x = 1:length(dataMap)
         
         colorVec = [colorVec; color]; %colors(val{x}(2) + 1, :) <<for sex distinction
         medVec = [medVec median(val{x}(4:end))];
+        medVecIvan = [medVec median(val{x}(4:end))];
     %end
 end
 
@@ -291,6 +308,43 @@ doubleVec = sortrows(doubleVec);
 loessOut = fLOESS(doubleVec, .25);
 plot(doubleVec(:,1), loessOut, 'LineWidth', 3);
 
+%Confidence Interval
+SEM = std(medVec)/sqrt(length(medVec));          % Standard Error
+ts = tinv([0.025  0.975],length(medVec)-1);      % T-Score
+CI = mean(medVec) + ts*SEM;                      % Confidence Intervals
+%??
+
+figurecounter = figurecounter + 1;
+
+
+
+%The scatter plot
+figure(figurecounter);
+oldest = max(ageVec);
+youngest = min(ageVec);
+scatter(ageVec, medVecIvan, 10, colorVec); 
+ylim([0, 15])
+yticks([3 5:.5:13 15])
+title("Ivan");
+hold on;
+
+% Old code for polynomial fit
+%[Fit, S] = polyfit(ageVec,medVec,2);
+%[y_fit,delta] = polyval(Fit,youngest:oldest,S);
+%plot(youngest:oldest,y_fit+2*delta, 'm--')
+%plot(youngest:oldest,y_fit-2*delta, 'm--')
+%plot(polyval(Fit,youngest:oldest));
+
+%This is the LOESS line of best fit
+doubleVec = [ageVec; medVec];
+tripleVec = [ageVec; colorVec; medVec];
+tripleVec = tripleVec';
+doubleVec = doubleVec';
+doubleVec = sortrows(doubleVec);
+loessOut = fLOESS(doubleVec, .25);
+plot(doubleVec(:,1), loessOut, 'LineWidth', 3);
+
+csvwrite("forR.csv",tripleVec);
 figurecounter = figurecounter + 1;
 
 
